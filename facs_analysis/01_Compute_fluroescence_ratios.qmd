@@ -1,0 +1,451 @@
+---
+title: "Compute fluorescence ratios from FACS data"
+author: "Lukas Adam"
+date: "`r format(Sys.time(), '%B/%d/%Y')`"
+format: 
+  html:
+    toc: true
+    code-fold: true
+    code-tools: true
+    self-contained: true
+    fig-format: svg
+---
+
+## Load libraries
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+library(tidyverse)
+library(openxlsx)
+library(stringr)
+library(ggplot2)
+library(ggrastr)
+library(ggridges)
+library(ggpubr)
+library(ggforce)
+library(ggh4x)
+library(readr)
+library(rtracklayer)
+library(purrr)
+library(MatrixExtra)
+library(flowCore)
+library(scales)
+
+# Source global definitions
+source("/projects/site/pred/ihb-g-deco/USERS/adaml9/publications/intestine-tf/global.R")
+```
+
+
+## Load raw FACS data (assume data was compensated for spillover)
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+facs.files <- list.files(io$indir.facs, pattern="*.fcs", full.names=TRUE)
+facs.names <- map_chr(facs.files, function(x) gsub(".fcs", "", gsub("20240111_", "", gsub(" ", "_", basename(x)))))
+
+facs.frames <- lapply(facs.files, read.FCS)
+names(facs.frames) <- facs.names
+
+facs.frames <- facs.frames[!grepl("Tube", names(facs.frames))]
+```
+
+## Assign plate layout based on fcs metadata
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+#' Process FACS Index Sorting Locations
+#'
+#' This function processes the FACS data to extract the index sorting locations and merges it with the expression data.
+#' 
+#' @param facs_frame A list of FACS frames, each containing an @description and @exprs slot.
+#' @return A data frame with the merged expression data and index sorting locations.
+#' @examples
+#' result <- process_facs_index_sorting(facs_frames[[1]])
+#' @import dplyr
+#' @import tidyr
+#' @import purrr
+#' @import tibble
+#' @export
+process_facs_index_sorting <- function(facs_frame) {
+  # Define plate rows and columns
+  plate.rows <- LETTERS[c(1:16)]
+  names(plate.rows) <- as.character(c(0:15))
+  plate.cols <- seq(1, 24)
+  names(plate.cols) <- as.character(seq(1, 24))
+  
+  # Extract and process description
+  d <- facs_frame@description
+  d <- d[grepl("^INDEX SORTING LOCATIONS", names(d))]
+  d.sorted.keys <- names(d)[map_int(names(d), function(x) as.integer(gsub("^INDEX SORTING LOCATIONS_", "", x)))]
+  
+  # Process index sorting locations
+  d.sorted.df <- d %>%
+    enframe() %>% unnest() %>% 
+    separate_rows(value, sep = ";") %>% 
+    dplyr::filter(value != "") %>%
+    separate(value, c("plate.row", "plate.col"), sep = ",") %>% 
+    mutate(plate.row = as.character(plate.row), plate.col = as.integer(plate.col)+1) %>%
+    mutate(name = factor(name, levels = d.sorted.keys)) %>% 
+    arrange(name) %>% 
+    mutate(plate.row = map_chr(as.character(plate.row), function(x) plate.rows[[x]])) %>% 
+    dplyr::select(-c("name")) %>% 
+    rownames_to_column(var = "plate.index") %>% 
+    mutate(plate.index = as.character(plate.index))
+  
+  # Process expression data and merge with index sorting locations
+  m <- as.data.frame(facs_frame@exprs) %>% 
+    rownames_to_column(var = "plate.index") %>%
+    pivot_longer(!plate.index, names_to = "parameter", values_to = "value")
+  m <- m %>% left_join(d.sorted.df, by = c("plate.index"))
+  
+  return(m)
+}
+
+facs.exprs <- lapply(facs.frames, process_facs_index_sorting)
+
+facs.exprs.merged <- facs.exprs %>% enframe() %>% unnest() %>% dplyr::rename(c("plate" = "name"))
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+facs.exprs.merged$plate <- factor(facs.exprs.merged$plate)
+levels(facs.exprs.merged$plate) <- c("IHB-JB_V001", "IHB-JB_V001", "IHB-JB_V002", "IHB-JB_V003", "IHB-JB_V004", "IHB-JB_V005", "IHB-JB_V006", "IHB-JB_V007", "IHB-JB_V008", "IHB-JB_V008", "IHB-JB_V008")
+
+# Assign plate labels to 384-well plate
+facs.exprs.merged <- facs.exprs.merged %>% 
+  rowwise() %>% 
+  mutate(label = ifelse(plate.row %in% LETTERS[c(1:4)], "neg", NA)) %>% 
+  mutate(label = ifelse(plate.row %in% LETTERS[c(5:10)], "green/yellow", label)) %>% 
+  mutate(label = ifelse(plate.row %in% LETTERS[c(11:16)], "red", label)) %>% 
+  mutate(label = ifelse(plate.row %in% LETTERS[c(15:16)], ifelse(plate.col %in% c(23, 24), "empty", label), label)) %>% 
+  mutate(label = ifelse(plate %in% c("IHB-JB_V008"), NA, label)) %>%
+  ungroup()
+
+saveRDS(facs.exprs.merged, paste0(io$indir.facs, "facs.data.rds"))
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig1
+#| fig-cap: "PE-CF594-A vs. Alexa Fluor 488-A"
+#| fig-width: 16
+#| fig-height: 4
+
+library(patchwork)
+
+facs.exprs <- readRDS(paste0(io$indir.facs, "facs.data.rds"))
+
+plate.design <- facs.exprs %>% 
+  dplyr::filter(plate=="IHB-JB_V001") %>%
+  dplyr::select(plate.row, plate.col, label) %>% 
+  distinct() %>% 
+  mutate(plate.row = factor(plate.row, levels=rev(LETTERS[1:length(unique(plate.row))]))) %>% 
+  mutate(plate.col = factor(plate.col, levels=as.character(1:length(unique(plate.col))))) %>% 
+  mutate(label = factor(label, levels=c("neg", "green/yellow", "red")))
+
+# Create the plot
+p1 <- ggplot(plate.design, aes(x = plate.col, y = plate.row, fill = label)) +
+  geom_tile(color = "black") +
+  theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.ticks = element_blank()) +
+  labs(x = "", y = "", fill = "Sorting") + 
+  scale_fill_manual(values=c("green/yellow" = "#374d37", "red" = "#b23e22", "neg" = "lightgrey"), na.translate = F) 
+
+facs.exprs <- facs.exprs %>% dplyr::filter(parameter %in% c("PE-CF594-A", "Alexa Fluor 488-A")) %>% arrange(plate, plate.index)
+facs.exprs.mat <- facs.exprs %>% pivot_wider(names_from=parameter, values_from=value) %>% 
+mutate(label = factor(label, levels=c("neg", "green/yellow", "red")))
+
+facs.exprs.mat <- facs.exprs.mat %>%
+mutate(`PE-CF594-A` = ifelse((`PE-CF594-A` < 0), 0, `PE-CF594-A`)) %>% 
+  mutate(`Alexa Fluor 488-A` = ifelse((`Alexa Fluor 488-A` < 0), 0, `Alexa Fluor 488-A`)) %>%
+  mutate(`PE-CF594-A` = `PE-CF594-A`+1, `Alexa Fluor 488-A`=`Alexa Fluor 488-A`+1)
+
+p2 <- ggplot(data=facs.exprs.mat, aes(x=`Alexa Fluor 488-A`, y=`PE-CF594-A`, color=label)) + 
+  geom_point() + 
+  theme_bw() + 
+  labs(x="Raw Alexa Fluor 488-A (green)", y="Raw PE-CF594-A (red)", color = "Sorting") + 
+  scale_color_manual(values=c("green/yellow" = "#374d37", "red" = "#b23e22", "neg" = "lightgrey"), na.translate = F) +
+  scale_x_continuous(trans="log10") + 
+  scale_y_continuous(trans="log10") 
+
+p <- p1 + p2
+outfile.dir <- paste(io$figdir, "VASA", "Fluorescence", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Raw_fluorescence_values_", current_datetime, ".pdf"))
+
+#ggsave(outfile.path, p, width=15, height=5)
+
+print(p)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+# Load necessary libraries
+library(caret)
+library(dplyr)
+library(e1071)
+
+# Prepare the data
+facs.exprs.mat.train <- facs.exprs.mat %>% 
+  drop_na(label) %>%
+  mutate(label = ifelse(label %in% c("neg"), "neg", "pos")) %>% 
+  dplyr::select(`Alexa Fluor 488-A`, `PE-CF594-A`, label)
+
+# Convert the label to a factor
+facs.exprs.mat.train$label <- as.factor(facs.exprs.mat.train$label)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+# Set up training control
+train_control <- trainControl(method = "cv", number = 10)
+
+# List of models to train
+models <- c("svmRadial", "rf", "nnet", "knn")
+
+model_list <- list()
+# Train models using caret and suppress messages and warnings
+for(model in models){
+  garbage <- capture.output(model.out <- train(label ~ ., data = facs.exprs.mat.train, method = model, trControl = train_control))
+  model_list[[model]] <- model.out
+}
+
+# Compare the models
+results <- resamples(model_list)
+summary(results)
+
+# Convert results to data frame for plotting
+results_df <- as.data.frame(results$values)
+
+# Gather the results into long format for ggplot
+results_long <- results_df %>%
+  gather(key = "Metric_Model", value = "Value", -Resample) %>%
+  separate(Metric_Model, into = c("Metric", "Model"), sep = "~")
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig2
+#| fig-cap: "Train classification models"
+#| fig-width: 8
+#| fig-height: 4
+
+# Plot the performance using ggplot
+p2 <- ggplot(results_long, aes(x = Model, y = Value, fill = Model)) +
+  geom_boxplot() +
+  facet_wrap(~ Metric, scales = "free_y") +
+  theme_bw() +
+  scale_fill_manual(values=c("Accuracy" = "#a18f8e", "Kappa" = "#b5a49e")) + 
+  labs(title = "Model Performance Comparison",
+       x = "Model",
+       y = "Performance Metric") +
+  theme(legend.position = "none")
+print(p2)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+best_model <- model_list[["knn"]]
+
+# Make predictions
+predictions <- predict(best_model, facs.exprs.mat.train)
+# Add the predictions to the original data frame
+facs.exprs.mat.train <- facs.exprs.mat.train %>%
+  mutate(PredictedLabel = predictions)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig3
+#| fig-cap: "Train classification models"
+#| fig-width: 8
+#| fig-height: 4
+
+# Plot the original data and predictions with decision boundary
+p3 <- ggplot(data = facs.exprs.mat.train, aes(x = `Alexa Fluor 488-A`, y = `PE-CF594-A`, color = PredictedLabel)) + 
+  geom_point() + 
+  theme_bw() + 
+  labs(x = "Raw Alexa Fluor 488-A (green)", y = "Raw PE-CF594-A (red)", color = "Label") + 
+  scale_color_manual(values = c("pos" = "#895552", "neg" = "lightgrey"), na.translate = FALSE) +
+  scale_x_continuous(trans = "log10") + 
+  scale_y_continuous(trans = "log10") 
+print(p3)
+
+p <- p2 + p3
+outfile.dir <- paste(io$figdir, "VASA", "Fluorescence", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Classified_fluorescence_values_", current_datetime, ".pdf"))
+
+print(p)
+
+#ggsave(outfile.path, p, width=12, height=5)
+```
+
+## Remove background
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+facs.exprs.all <- facs.exprs %>% pivot_wider(names_from=parameter, values_from=value)
+facs.exprs.all$label <- predict(best_model, facs.exprs.all %>% dplyr::select(`PE-CF594-A`, `Alexa Fluor 488-A`))
+
+# Filter to positive cells
+facs.exprs.foreground.mat <- facs.exprs.all %>% 
+                    dplyr::filter(label=="pos")
+
+lower_limit <- -5
+upper_limit <- 0
+
+# Normalize the data
+facs.exprs.foreground.mat <- facs.exprs.foreground.mat %>% 
+  mutate(`PE-CF594-A.Normalized` = (`PE-CF594-A` - min(`PE-CF594-A`)) / (max(`PE-CF594-A`) - min(`PE-CF594-A`))) %>% 
+  mutate(`Alexa Fluor 488-A.Normalized` = (`Alexa Fluor 488-A` - min(`Alexa Fluor 488-A`)) / (max(`Alexa Fluor 488-A`) - min(`Alexa Fluor 488-A`))) %>% 
+  mutate(`PE-CF594-A.Normalized` = log10(`PE-CF594-A.Normalized` + 1e-10)) %>%
+  mutate(`Alexa Fluor 488-A.Normalized` = log10(`Alexa Fluor 488-A.Normalized` + 1e-10)) %>%
+  mutate(`PE-CF594-A.Normalized` = pmax(pmin(`PE-CF594-A.Normalized`, upper_limit), lower_limit)) %>%
+  mutate(`Alexa Fluor 488-A.Normalized` = pmax(pmin(`Alexa Fluor 488-A.Normalized`, upper_limit), lower_limit))
+  
+# Plot distribution of normalized fluorescence values
+p4 <- ggplot(facs.exprs.foreground.mat, aes(x=`Alexa Fluor 488-A.Normalized`, y=`PE-CF594-A.Normalized`)) + 
+  geom_point() + 
+  theme_bw() +
+  labs(x="Normalized Alexa Fluor 488-A (green)", y="Normalized PE-CF594-A (red)") 
+print(p4)
+
+```
+
+## Graph-based pseudotime inference
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+library(monocle3)
+library(destiny)
+
+data_matrix <- facs.exprs.foreground.mat %>% 
+  unite(plate.index2, c("plate.row", "plate.col"), sep="") %>% 
+  unite(plate.index3, c("plate", "plate.index2"), sep="@") %>%
+  dplyr::select(plate.index3, `PE-CF594-A.Normalized`, `Alexa Fluor 488-A.Normalized`) %>% 
+  column_to_rownames(var="plate.index3") %>%
+  as.matrix()
+
+dm <- DiffusionMap(data_matrix)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig4
+#| fig-cap: "Diffusion-based pseudotime on fluorescence intensities"
+#| fig-width: 8
+#| fig-height: 4
+
+facs.exprs.foreground.mat$DT <- rank(eigenvectors(dm)[,1])
+
+# Step 1: Reverse the order of pseudotime
+max_rank <- max(facs.exprs.foreground.mat$DT)
+facs.exprs.foreground.mat$reversed_DT <- max_rank - facs.exprs.foreground.mat$DT
+
+# Step 2: Normalize the reversed pseudotime to range [0, 1]
+min_reversed_DT <- min(facs.exprs.foreground.mat$reversed_DT)
+max_reversed_DT <- max(facs.exprs.foreground.mat$reversed_DT)
+facs.exprs.foreground.mat$normalized_reversed_DT <- 
+  (facs.exprs.foreground.mat$reversed_DT - min_reversed_DT) / 
+  (max_reversed_DT - min_reversed_DT)
+
+facs.exprs.foreground.mat$DT <- facs.exprs.foreground.mat$normalized_reversed_DT
+
+# Compute DT.old also via direct division of PE-CF594-A.Normalized by Alexa Fluor 488-A.Normalized
+facs.exprs.foreground.mat$DT.old <- facs.exprs.foreground.mat$`PE-CF594-A.Normalized` / (facs.exprs.foreground.mat$`Alexa Fluor 488-A.Normalized` + facs.exprs.foreground.mat$`PE-CF594-A.Normalized`)
+
+facs.exprs.foreground.mat <- facs.exprs.foreground.mat %>% dplyr::select(-c("reversed_DT", "normalized_reversed_DT"))
+
+p <- ggplot(facs.exprs.foreground.mat, aes(x=`Alexa Fluor 488-A`, y=`PE-CF594-A`, color=DT)) + 
+  geom_point() + 
+  theme_bw() +
+  scale_color_gradientn(
+      colours=c("#374d37", "#51a144", "#fae503", "#d53827", "#b23e22")
+  ) +
+  scale_x_continuous(trans="log10") + 
+  scale_y_continuous(trans="log10") +
+  labs(color="Normalized DT")
+print(p)
+
+outfile.dir <- paste(io$figdir, "VASA", "Fluorescence", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("KNN_pos_classified_fluorescence_values_", current_datetime, ".pdf"))
+
+#ggsave(outfile.path, p, width=8, height=4)
+
+saveRDS(facs.exprs.foreground.mat, paste0(io$indir.facs, "facs.data.normalized.knn.rds"))
+
+
+
+
+
+# Plot DT.old and DT against each other
+p2 <- ggplot(facs.exprs.foreground.mat, aes(x=DT.old, y=DT)) + 
+  geom_point() + 
+  theme_bw() +
+  labs(x="DT.old (PE-CF594-A.Normalized / Alexa Fluor 488-A.Normalized)", y="DT (Diffusion pseudotime)")
+print(p2)
+```

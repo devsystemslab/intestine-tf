@@ -1,0 +1,8 @@
+*.nextflow
+.secrets.toml
+
+*.sbatch
+*.err
+*.out
+
+.nextflow.log

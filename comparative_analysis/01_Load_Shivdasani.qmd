@@ -1,0 +1,220 @@
+---
+title: "Load Shivdasani"
+author: "Lukas Adam"
+date: "5/17/2024"
+format: 
+  html:
+    toc: true
+    code-fold: true
+    self-contained: true
+---
+
+## Load libraries
+```{r}
+#| eval: true
+#| message: false 
+#| warning: false
+
+library(reticulate)
+
+reticulate::use_python("/home/adaml9/scratch/miniforge3/envs/scFates/bin/python")
+
+library(tidyverse)
+library(Seurat)
+
+options(Seurat.object.assay.version = "v3")
+
+library(Signac)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(ggforce)
+library(patchwork)
+library(here)
+library(scales)
+library(SCpubr)
+library(sceasy)
+
+set.seed(1)
+
+# Source global definitions
+source("/projects/site/pred/ihb-g-deco/USERS/adaml9/intestine_fate/notebooks/global.R")
+# Source colors
+#source("/projects/site/pred/ihb-g-deco/USERS/adaml9/phd_frameworks/articulate/plotting/color_palettes.R")
+
+data.base.dir <- "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/external/shivdasani"
+```
+
+## Load data
+```{r}
+#| eval: true
+#| message: false 
+#| warning: false
+
+data.dirs <- list.dirs(data.base.dir, full.names=TRUE)
+data.dirs <- data.dirs[-c(1)]
+names(data.dirs) <- map_chr(data.dirs, basename)
+data.seurat.list <- purrr::imap(data.dirs, function(data.dir, project.name){
+  counts <- Read10X(data.dir = data.dir)
+  seurat_object <- CreateSeuratObject(counts = counts, project = project.name)
+  return(seurat_object)
+})
+
+saveRDS(data.seurat.list, paste0(data.base.dir, "/seurat.list.rds"))
+```
+
+## Merge datasets
+
+```{r}
+#| eval: true
+#| message: false 
+#| warning: false
+
+data.seurat.list <- readRDS(paste0(data.base.dir, "/seurat.list.rds"))
+
+# Check expression of fabp1.counts across all datasets
+fabp1.counts <- map_dbl(data.seurat.list, function(seurat_object){
+  if("FABP1" %in% rownames(seurat_object)){
+    return(sum(LayerData(seurat_object, assay = "RNA", layer = "counts")["FABP1", ]))
+  } else {
+    return(NA)
+  }
+})
+print(fabp1.counts)
+
+data.seurat <- Reduce(merge, data.seurat.list)
+
+data.seurat[["RNA"]] <- split(data.seurat[["RNA"]], f = data.seurat$orig.ident)
+
+data.seurat <- NormalizeData(data.seurat)
+data.seurat <- FindVariableFeatures(data.seurat)
+data.seurat <- ScaleData(data.seurat)
+data.seurat <- RunPCA(data.seurat)
+data.seurat <- RunUMAP(data.seurat, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+
+saveRDS(data.seurat, paste0(data.base.dir, "/seurat.processed.rds"))
+```
+
+## Assign cell type classification
+```{r}
+#| eval: true
+#| message: false 
+#| warning: false
+
+sample.timepoint.assignment <- list(
+  "GSM7661365_SIGAA1" = "D1",
+  "GSM7661366_SIGAA2" = "D3",
+  "GSM7661367_D4A9" = "D4",
+  "GSM7661368_D5A10" = "D5",
+  "GSM7661369_SIGAA3" = "D6_1",
+  "GSM7661370_D6scrna" = "D6_2"
+)
+sample.timepoint.assignment.df <- sample.timepoint.assignment %>% enframe() %>% unnest() %>%
+                                        dplyr::rename(c("orig.ident" = "name", "timepoint" = "value"))
+
+
+data.seurat <- readRDS(paste0(data.base.dir, "/seurat.processed.rds"))
+ct.annotations.df <- read.table(paste0(data.base.dir, "/GSE238274_scRNA_celltype_annotation.txt"), sep="\t")
+colnames(ct.annotations.df) <- c("barcode", "paper.annotation")
+
+# Get original barcode (first element after splitting by "_") for data.seurat
+data.seurat@meta.data$orig.barcode <- data.seurat@meta.data %>% 
+  rownames() %>% 
+  str_split("_") %>% 
+  map_chr(function(x) x[[1]])
+
+# Get barcode (last element after splitting by "_") for ct.annotations.df
+ct.annotations.df$orig.barcode <- ct.annotations.df$barcode %>% 
+  str_split("_") %>% 
+  map_chr(function(x) x[[length(x)]])
+
+# Get timepoint i.e. everything before the last element after splitting by "_") for ct.annotations.df
+ct.annotations.df$timepoint <- ct.annotations.df$barcode %>% 
+  str_split("_") %>% 
+  map_chr(function(x) paste0(x[1:(length(x)-1)], collapse="_"))
+
+# Add the timepoint information to the metadata of data.seurat
+data.seurat@meta.data <- data.seurat@meta.data %>% 
+  rownames_to_column(var="cell") %>% 
+  left_join(sample.timepoint.assignment.df, by=c("orig.ident" = "orig.ident")) %>%
+  column_to_rownames(var="cell")
+
+# For both data.seurat and ct.annotations.df, create a new column "aligned.barcode" that combines the timepoint and original barcode
+data.seurat@meta.data$aligned.barcode <- paste0(data.seurat@meta.data$timepoint, "|", data.seurat@meta.data$orig.barcode)
+ct.annotations.df$aligned.barcode <- paste0(ct.annotations.df$timepoint, "|", ct.annotations.df$orig.barcode)
+
+# Get how many barcodes are shared, how many barcodes are in data.seurat but not in ct.annotations.df, and how many barcodes are in ct.annotations.df but not in data.seurat
+shared.barcodes <- intersect(
+  data.seurat@meta.data$aligned.barcode,
+  ct.annotations.df$aligned.barcode
+)
+barcodes.in.seurat.not.in.annotations <- setdiff(
+  data.seurat@meta.data$aligned.barcode,
+  ct.annotations.df$aligned.barcode
+)
+barcodes.in.annotations.not.in.seurat <- setdiff(
+  ct.annotations.df$aligned.barcode,
+  data.seurat@meta.data$aligned.barcode
+)
+print("Number of shared barcodes: ")
+print(length(shared.barcodes))
+print("Number of barcodes in seurat but not in annotations: ")
+print(length(barcodes.in.seurat.not.in.annotations))
+print("Number of barcodes in annotations but not in seurat: ")
+print(length(barcodes.in.annotations.not.in.seurat))
+
+# Remove barcode, orig.barcode and timepoint columns from ct.annotations.df
+ct.annotations.df <- ct.annotations.df %>%
+  select(-c(barcode, orig.barcode, timepoint))
+
+data.seurat@meta.data <- data.seurat@meta.data %>% 
+  rownames_to_column(var="cell") %>% 
+  left_join(ct.annotations.df, by=c("aligned.barcode" = "aligned.barcode")) %>% 
+  column_to_rownames(var="cell")
+
+saveRDS(data.seurat, paste0(data.base.dir, "/seurat.processed.annotated.rds"))
+```
+
+## Reprocess after filtering
+```{r}
+#| eval: true
+#| message: false 
+#| warning: false
+
+# Load data
+data.seurat <- readRDS(paste0(data.base.dir, "/seurat.processed.annotated.rds"))
+
+# Join layers
+data.seurat[["RNA"]] <- as(data.seurat[["RNA"]], "Assay")
+
+# Sum counts for FABP1 across all cells and print the result
+fabp1.counts <- LayerData(data.seurat, assay = "RNA", layer = "counts")["FABP1", ]
+print(sum(fabp1.counts))
+
+
+# Check if FABP1 is present as gene in all datasets
+gene.check <- "FABP1" %in% rownames(data.seurat)
+print(gene.check)
+
+
+# Filter out cells without annotation i.e. low quality cells
+keep.cells <- data.seurat@meta.data %>% 
+  rownames_to_column(var="cell") %>% 
+  dplyr::filter(!is.na(paper.annotation)) %>% 
+  pull(cell)
+
+data.seurat <- subset(data.seurat, cells = keep.cells)
+
+data.seurat <- NormalizeData(data.seurat)
+data.seurat <- FindVariableFeatures(data.seurat)
+data.seurat <- ScaleData(data.seurat)
+data.seurat <- RunPCA(data.seurat)
+data.seurat <- RunUMAP(data.seurat, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+
+# Convert Assay5 to Assay
+data.seurat[["RNA"]] <- as(data.seurat[["RNA"]], "Assay")
+
+# Save the processed and annotated Seurat object
+data.seurat.diet <- DietSeurat(data.seurat, counts = TRUE, data = TRUE, scale.data = FALSE, assays = c("RNA"), dimreducs = c("umap.unintegrated"))
+sceasy::convertFormat(data.seurat.diet, from = "seurat", to = "anndata", outFile = paste0(data.base.dir, "/seurat.processed.annotated.h5ad"))
+```

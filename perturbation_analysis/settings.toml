@@ -1,0 +1,37 @@
+[io]
+raw_data = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/raw"
+processed_data = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/processed"
+combined_data = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/combined"
+anndata = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/anndata_objects"
+external_data = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/external_data"
+
+[analysis]
+figures_dir = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/figures"
+tables_dir = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/tables"
+models_dir = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/tf_ko_screen/panel/models"
+
+[ct_palette]
+
+[ct_palette.proliferative_axis]
+"Stem Cells" = "#1f77b4"          # deep blue
+"TA Cells" = "#4c91c6"            # medium blue
+"Cycling TA Cells" = "#7aaed6"    # light blue
+
+[ct_palette.absorptive_lineage]
+"Enterocytes" = "#2ca02c"         # green
+
+[ct_palette.secretory_lineage]
+"Goblet Cells" = "#ff7f0e"        # orange
+"Paneth Cells" = "#ffbb78"        # light orange
+
+[ct_palette.eec_progenitors]
+"Early EEC Progenitors" = "#9467bd"   # purple
+"EEC Progenitors" = "#9467bd"   # purple
+"Late EEC Progenitors" = "#b699d1"    # light purple
+
+[ct_palette.eec_subtypes]
+"EC Cells" = "#d62728"             # strong red
+"D Cells" = "#17becf"              # cyan / turquoise
+"X Cells" = "#e377c2"              # magenta
+"K Cells" = "#bcbd22"              # olive
+"I/N Cells" = "#7f7f7f"            # dark grey

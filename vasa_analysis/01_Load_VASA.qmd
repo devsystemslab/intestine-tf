@@ -1,0 +1,1352 @@
+---
+title: "Analyze VASA-seq data"
+author: "Lukas Adam"
+date: "`r format(Sys.time(), '%B/%d/%Y')`"
+format: 
+  html:
+    toc: true
+    code-fold: true
+    code-tools: true
+    self-contained: true
+    fig-format: svg
+---
+
+## Load libraries
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+library(reticulate)
+
+reticulate::use_python("/gpfs/scratchfs01/site/u/adaml9/miniforge3/envs/scFates/bin/python")
+
+library(tidyverse)
+library(Seurat)
+library(ggplot2)
+library(ggrepel)
+library(ggpubr)
+library(ggforce)
+library(patchwork)
+library(here)
+library(scales)
+library(SCpubr)
+library(sceasy)
+
+set.seed(1)
+
+# Source global definitions
+source("/projects/site/pred/ihb-g-deco/USERS/adaml9/intestine_fate/notebooks/global.R")
+# Source colors
+# source("/projects/site/pred/ihb-g-deco/USERS/adaml9/phd_frameworks/articulate/plotting/color_palettes.R")
+```
+
+## Load VASA data
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+data.seurat <- readRDS("/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/sequencing_data/2023-2074-ihb-jb-v001-v008/exploratory_analysis/analysis_results/filtered_processed_seurat_object.rds")
+
+DefaultAssay(data.seurat) <- "RNA"
+data.seurat[["RNA"]] <- as(data.seurat[["RNA"]], "Assay")
+
+#data.seurat.diet <- DietSeurat(data.seurat, counts = TRUE, data = TRUE, scale.data = FALSE, assays = c("RNA"), dimreducs = c("umap"))
+#sceasy::convertFormat(data.seurat.diet, from = "seurat", to = "anndata", outFile = "/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/sequencing_data/2023-2074-ihb-jb-v001-v008/exploratory_analysis/analysis_results/filtered_processed_seurat_object.h5ad")
+```
+
+## Plot the data 
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig1
+#| fig-cap: "Data with precomputed clusters"
+#| fig-width: 10
+#| fig-height: 7
+
+p <- SCpubr::do_DimPlot(sample = data.seurat, group.by = "Cluster", reduction="umap", label = TRUE) + 
+        ggtitle("Precomputed clusters") +
+        theme(plot.title = element_text(hjust = 0.5), legend.position="none") 
+print(p)
+```
+
+## Annotate clusters
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+cluster.annotations <- list("0" = "NEUROG3+ population", "1" = "X cells", "2" = "Stem cells", "3" = "ECs", "4" = "Specialized EECs", "5" = "Enterocytes", "6" = "Goblet cells + CDH18+ cells", "7" = "cycling TA cells")
+cluster.annotations <- cluster.annotations %>% 
+                        enframe() %>% 
+                        unnest() %>% 
+                        dplyr::rename("Cluster"="name", 
+                                      "cell_type_initial"="value")
+
+data.seurat@meta.data <- data.seurat@meta.data %>% 
+    rownames_to_column(var="cell") %>% 
+    left_join(cluster.annotations, by="Cluster") %>%
+    column_to_rownames(var="cell") 
+
+paste0("We observe: ", subset(data.seurat, subset = cell_type_initial %in% c("NEUROG3+ population", "X cells", "ECs", "Specialized EECs")) %>% colnames() %>% length(), " EECs")
+
+write.table(data.seurat@meta.data, paste0(io$outdir.processed, "/vasa.processed.metadata.annotated.tsv"), sep="\t")
+```
+
+## Plot after annotations
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig2A
+#| fig-cap: "Data after manual annotations"
+#| fig-width: 10
+#| fig-height: 7
+
+p <- SCpubr::do_DimPlot(sample = data.seurat, group.by = "cell_type_initial", reduction="umap", label = TRUE) + 
+        theme(plot.title = element_text(hjust = 0.5), legend.position="none") 
+
+# Extract color mapping from the plot
+color_map <- ggplot2::ggplot_build(p)$data[[2]][,c("group", "colour")] %>%
+                  distinct() %>%
+                  arrange(group)
+
+print(p)
+
+outfile.dir <- paste(io$figdir, "VASA", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Initial_dataset_annotations_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=8, height=6)
+```
+
+## Plot marker genes
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig2A
+#| fig-cap: "Data after manual annotations"
+#| fig-width: 10
+#| fig-height: 7
+
+library(scDotPlot)
+
+# Get colors from previous plot
+colors.use <- color_map$colour
+# First we set the proper levels for the cell type annotations
+data.seurat$cell_type_initial <- factor(data.seurat$cell_type_initial, levels=c("Stem cells", "cycling TA cells", "Enterocytes", "Goblet cells + CDH18+ cells", "NEUROG3+ population", "ECs", "X cells", "Specialized EECs"))
+
+# Now we specify the gene list we want to visualize
+genes.to.use <- rev(c("LGR5", "SMOC2", "MKI67", "TOP2A", "FABP2", "APOA4", "MUC2", "FCGBP", "NEUROG3", "HES6", "CHGA", "TPH1", "LMX1A", "GHRL", "MLN", "SST", "GIP", "CCK", "NTS"))
+
+
+p <- data.seurat %>%
+    scDotPlot(scale = TRUE,
+              features = genes.to.use,
+              group = "cell_type_initial",
+              groupAnno = "cell_type_initial",
+              annoColors = list("cell_type_initial" = colors.use),
+              groupLegends = FALSE,
+              cluster = FALSE,
+              annoWidth = 0.075)
+
+outfile.dir <- paste(io$figdir, "VASA", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Initial_dataset_annotations_heatmap_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=6, height=8)
+```
+
+## Plot individual marker genes
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig3
+#| fig-cap: "Marker gene expression"
+#| fig-width: 20
+#| fig-height: 20
+
+plotlist <- lapply(c("NEUROG3", "GCG", "CCK", "PERCC1", "GHRL", "SST", "TPH1", "GIP", "NTS"), function(x){
+  SCpubr::do_FeaturePlot(sample = data.seurat, features = x, reduction="umap", legend.title = x) + guides(fill = 'none') 
+})
+
+p <- ggarrange(plotlist=plotlist, nrow=3, ncol=3) 
+print(p)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig4
+#| fig-cap: "Data after manual annotations"
+#| fig-width: 10
+#| fig-height: 7
+
+# Basic bar plot, horizontal.
+p2 <- SCpubr::do_BarPlot(sample = data.seurat, group.by = "cell_type_initial",
+                         legend.position = "none", 
+                         plot.title = "Number of cells per cell type") + 
+          labs(x="", y="Number of cells")
+
+print(p2)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig5
+#| fig-cap: "Data after manual annotations"
+#| fig-width: 10
+#| fig-height: 7
+
+# Split by a second variable.
+p3 <- SCpubr::do_BarPlot(sample = data.seurat, 
+                         group.by = "cell_type_initial",
+                         split.by = "Library",
+                         plot.title = "Number of cells per cluster in each library",
+                         position = "fill",
+                         flip = FALSE,
+                         add.n = TRUE,
+                         add.n.size = 4) + 
+        labs(x="", y="Number of cells") +
+        theme(legend.position="right")
+print(p3)
+```
+
+## Load plate layout and FACS data
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+# Load FACS data
+facs.data <- readRDS(paste0(io$indir.facs, "facs.data.normalized.knn.rds"))
+facs.data <- facs.data %>%
+  dplyr::select(plate, plate.index, plate.row, plate.col, label, DT) %>% 
+  mutate(plate = gsub("_", "-", plate)) %>%
+  mutate(plate = gsub("V", "v", plate)) %>%
+  unite(Well.ID, c("plate.row", "plate.col"), sep="", remove=FALSE) %>% 
+  dplyr::select(-c("plate.index", "plate.row", "plate.col")) 
+
+# Load plate layout
+plate.layout <- read.table("/projects/site/pred/ihb-intestine-evo/lukas_area/eec_fate_project/sequencing_data/2023-2074-ihb-jb-v001-v008/exploratory_analysis/position_of_cells_on_plate.tsv", sep="\t", header=TRUE)
+plate.layout <- plate.layout %>% dplyr::rename(c("Cell.ID" = "Sequence", "Well.ID" = "wellID"))# %>% 
+  #mutate(rows = str_extract(Well.ID, "[aA-zZ]+")) %>% 
+  #mutate(cols = as.integer(str_remove(Well.ID, rows)))
+  
+facs.data <- facs.data %>% left_join(plate.layout, by=c("Well.ID" = "Well.ID")) 
+facs.data <- facs.data %>% unite(Cell.ID, c("plate", "Cell.ID"), sep="_")
+
+data.seurat@meta.data <- data.seurat@meta.data %>% 
+  rownames_to_column(var="Cell.ID") %>% 
+  left_join(facs.data, by=c("Cell.ID" = "Cell.ID")) %>% 
+  column_to_rownames(var="Cell.ID")
+
+cells.keep <- data.seurat@meta.data %>% 
+                  dplyr::filter(!is.na(DT)) %>% rownames()
+data.seurat <- data.seurat[,cells.keep]
+
+saveRDS(data.seurat, paste0(io$outdir.processed, "/vasa.processed.v3.rds"))
+
+# ------------------------------------------------- #
+data.seurat <- readRDS(paste0(io$outdir.processed, "/vasa.processed.v3.rds"))
+data.seurat.diet <- DietSeurat(data.seurat, counts = TRUE, data = TRUE, scale.data = FALSE, assays = c("RNA"), dimreducs = c("pca", "umap"))
+sceasy::convertFormat(data.seurat.diet, from = "seurat", to = "anndata", outFile = paste0(io$outdir.processed, "/vasa.processed.v3.annotated.h5ad"))
+```
+
+## Plot data with fluorescence ratios
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig6
+#| fig-cap: "Data with fluorescence ratios"
+#| fig-width: 10
+#| fig-height: 7
+
+data.seurat <- readRDS(paste0(io$outdir.processed, "/vasa.processed.v3.rds"))
+
+# SCpubr's Feature Plot.
+p <- SCpubr::do_FeaturePlot(sample = data.seurat, features = "DT", 
+                              reduction="umap", legend.title = "Fluorescence Ratios (Normalized DT)") +
+                              guides(fill = "none") 
+print(p)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig8
+#| fig-cap: "Data with fluorescence ratios"
+#| fig-width: 10
+#| fig-height: 7
+p <- SCpubr::do_BeeSwarmPlot(sample = data.seurat, 
+                              feature_to_rank = "DT", 
+                              group.by="cell_type_initial",
+                              continuous_feature = TRUE,
+                              order=TRUE,
+                              legend.title = "Fluorescence Ratios (Normalized DT)")
+print(p)
+```
+
+## Subset to EECs and redo dim reduction
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+set.seed(10)
+data.seurat.eecs <- subset(data.seurat, subset = cell_type_initial %in% c("Stem cells", "Enterocytes", "Goblet cells + CDH18+ cells", "cycling TA cells"), invert=TRUE)
+
+data.seurat.eecs <- SCTransform(data.seurat.eecs)
+data.seurat.eecs <- RunPCA(data.seurat.eecs, npcs = 30, verbose = F)
+data.seurat.eecs <- FindNeighbors(data.seurat.eecs, dims = 1:30, reduction = "pca")
+data.seurat.eecs <- FindClusters(data.seurat.eecs, resolution = 1)
+data.seurat.eecs <- RunUMAP(data.seurat.eecs, reduction = "pca", dims = 1:30)
+saveRDS(data.seurat.eecs,paste0(io$outdir.processed, "/vasa.processed.eecs.v3.rds"))
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig9
+#| fig-cap: "Data with fluorescence ratios"
+#| fig-width: 10
+#| fig-height: 7
+
+library(splines)
+
+data.seurat.eecs <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.v3.rds"))
+expr.df <- FetchData(data.seurat.eecs, c("DT", "NEUROG3"))
+#expr.df <- expr.df %>% dplyr::filter(abs(DT) < 5)
+p <- ggplot(data=expr.df, aes(x=`DT`, y=`NEUROG3`, color=DT)) + 
+  geom_point() + 
+  theme_bw() + 
+  scale_y_continuous(expand=c(0, 0)) +
+  scale_color_gradientn(
+      colours=c("#374d37", "#51a144", "#fae503", "#d53827", "#b23e22")
+  )
+
+outfile.dir <- paste(io$figdir, "VASA", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("NEUROG3_DT_Scatter_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=8, height=4)
+
+print(p)
+```
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+Idents(data.seurat.eecs) <- "seurat_clusters"
+cluster.query <- 1
+data.seurat.eecs <- FindSubCluster(
+  data.seurat.eecs,
+  cluster.query,
+  graph.name = "SCT_snn",
+  subcluster.name = "seurat_clusters",
+  resolution = 1,
+  algorithm = 1
+)
+
+# ------------------------------------------------- #
+
+p1 <- SCpubr::do_DimPlot(sample = data.seurat.eecs, group.by = "seurat_clusters", reduction="umap", label = TRUE) + 
+        theme(plot.title = element_text(hjust = 0.5), legend.position="none") 
+
+p2 <- SCpubr::do_FeaturePlot(sample = data.seurat.eecs, c("CCK", "GIP"), reduction="umap") + 
+        theme(plot.title = element_text(hjust = 0.5), legend.position="none") 
+
+data.seurat.diet <- DietSeurat(data.seurat.eecs, counts = TRUE, data = TRUE, scale.data = FALSE, assays = c("SCT"), dimreducs = c("pca", "umap"))
+data.seurat.diet <- RenameAssays(data.seurat.diet, SCT = "RNA")
+sceasy::convertFormat(data.seurat.diet, from = "seurat", to = "anndata", outFile = paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.h5ad"))
+
+# ------------------------------------------------- #
+# Annotate EECs
+
+cluster.annotations <- list(
+  "0" = "Late ECs",
+  "1_0" = "Early I/K cells",
+  "1_1" = "I cells",
+  "1_2" = "K cells",
+  "1_3" = "Late I/K cells",
+  "1_4" = "Late I/K cells",
+  "2" = "Late X cells",
+  "4" = "Early ECs",
+  "3" = "Early X cells",
+  "5" = "Early EECs",
+  "6" = "Early X cells",
+  "7" = "D cells",
+  "8" = "Late ECs",
+  "9" = "SMOC2+ cells")
+
+cluster.annotations <- cluster.annotations %>% 
+                        enframe() %>% 
+                        unnest() %>% 
+                        dplyr::rename("seurat_clusters"="name", 
+                                      "cell_type_initial"="value")
+
+data.seurat.eecs@meta.data <- data.seurat.eecs@meta.data %>% 
+    rownames_to_column(var="cell") %>% 
+    dplyr::select(-c("cell_type_initial")) %>%
+    left_join(cluster.annotations, by="seurat_clusters") %>%
+    column_to_rownames(var="cell") 
+
+saveRDS(data.seurat.eecs,paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.rds"))
+
+# ------------------------------------------------- #
+# Rotate UMAP
+
+#' Rotate UMAP Coordinates in a Seurat Object
+#'
+#' This function rotates the UMAP coordinates in a Seurat object by a specified angle.
+#' It updates the UMAP embeddings in the Seurat object with the rotated coordinates.
+#'
+#' @param seurat_object A Seurat object containing UMAP embeddings.
+#' @param angle The angle in degrees by which to rotate the UMAP coordinates.
+#' @param reduction The name of the dimensionality reduction technique used, typically "umap". 
+#' Defaults to "umap".
+#'
+#' @return A Seurat object with updated UMAP coordinates after rotation.
+#' @export
+#'
+#' @examples
+#' \dontrun{
+#'   # Rotate the UMAP coordinates by 45 degrees
+#'   data.seurat.eecs <- rotate_umap(data.seurat.eecs, angle = 45)
+#'
+#'   # Check the rotated UMAP
+#'   DimPlot(data.seurat.eecs, reduction = "umap")
+#' }
+rotate_umap <- function(seurat_object, angle, reduction = "umap") {
+  
+  # Convert degrees to radians
+  deg <- function(x) {
+    x * pi / 180
+  }
+  
+  # Get the UMAP coordinates from the Seurat object
+  umap_coords <- seurat_object@reductions[[reduction]]@cell.embeddings
+  
+  # Rotation matrix
+  R <- matrix(
+    c(
+      cos(deg(angle)), -sin(deg(angle)),
+      sin(deg(angle)), cos(deg(angle))
+    ),
+    nrow = 2
+  )
+  
+  # Rotate the UMAP coordinates
+  rotated_coords <- apply(umap_coords, 1, function(x) R %*% x)
+  rotated_coords <- t(rotated_coords)  # Transpose to correct orientation
+  colnames(rotated_coords) <- colnames(umap_coords)
+  # Update the Seurat object with the rotated coordinates
+  seurat_object@reductions[[reduction]]@cell.embeddings <- rotated_coords
+  
+  return(seurat_object)
+}
+
+data.seurat.eecs <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.rds"))
+
+data.seurat.eecs <- rotate_umap(data.seurat.eecs, 180)
+
+saveRDS(data.seurat.eecs,paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.rds"))
+
+# ------------------------------------------------- #
+
+data.seurat.eecs <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.rds"))
+
+DefaultAssay(data.seurat.eecs) <- "RNA"
+data.seurat.diet <- DietSeurat(data.seurat.eecs, counts = TRUE, data = TRUE, scale.data = FALSE, assays = c("RNA"), dimreducs = c("pca", "umap"))
+data.seurat.diet@assays$RNA@data <- data.seurat.diet@assays$RNA@counts 
+
+sceasy::convertFormat(data.seurat.diet, from = "seurat", to = "anndata", outFile = paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.h5ad"))
+
+library(MuDataSeurat)
+
+data.seurat.diet <- DietSeurat(data.seurat.eecs, counts = TRUE, data = TRUE, scale.data = FALSE, assays = c("SCT"), dimreducs = c("pca", "umap"), graphs = c("SCT_nn", "SCT_snn"))
+#data.seurat.diet <- RenameAssays(data.seurat.diet, SCT = "RNA")
+#data.seurat.diet@graphs$RNA_nn <- data.seurat.diet@graphs$SCT_nn
+#data.seurat.diet@graphs$RNA_snn <- data.seurat.diet@graphs$SCT_snn
+
+#DefaultAssay(data.seurat.diet) <- "RNA"
+#data.seurat.diet <- JoinLayers(data.seurat.diet)
+
+MuDataSeurat::WriteH5AD(data.seurat.diet, paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.h5ad"), assay="SCT")
+```
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig10A
+#| fig-cap: "EEC subset with subclustering"
+#| fig-width: 10
+#| fig-height: 7
+
+data.seurat.eecs <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.rds"))
+
+p1 <- SCpubr::do_DimPlot(sample = data.seurat.eecs, group.by = "cell_type_initial", reduction="umap", label = TRUE) + 
+        theme(plot.title = element_text(hjust = 0.5), legend.position="none") +
+        scale_color_manual(values=project.params$ct.colors)
+
+p2 <- SCpubr::do_FeaturePlot(sample = data.seurat.eecs, features = "DT", 
+                              reduction="umap", group.by="cell_type_initial",
+                              legend.title = "Fluorescence Ratios (Normalized DT)") +
+                              guides(fill = "none") 
+    
+p <- p1 + p2 
+print(p)
+
+outfile.dir <- paste(io$figdir, "VASA", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Embedding_and_Fluorescent_ratios_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=10, height=7)
+```
+
+## Plot marker genes
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig10B
+#| fig-cap: "EEC subset with subclustering - marker genes"
+#| fig-width: 10
+#| fig-height: 7
+
+library(scDotPlot)
+
+colors.use <- project.params$ct.colors[as.character(unique(data.seurat.eecs$cell_type_initial))
+]
+
+# First we set the proper levels for the cell type annotations
+data.seurat.eecs$cell_type_initial <- factor(data.seurat.eecs$cell_type_initial, levels=c("SMOC2+ cells", "Early EECs", "Early ECs", "Late ECs","Early X cells", "Late X cells", "D cells", "Early I/K cells", "Late I/K cells", "I cells", "K cells"))
+
+# Now we specify the gene list we want to visualize
+genes.to.use <- rev(c("LGR5", "SMOC2", "NEUROG3", "HES6", "PAX4", "SULF2", "TPH1", "CHGB", "CES1", "LMX1A", "PERCC1", "EPHA4", "ACSL1", "OGFRL1", "SV2B", "GHRL", "MLN", "SST", "HHEX", "PAX6", "CCK", "TENM4", "NTS", "GIP", "MME", "PLAGL1"))
+
+p <- data.seurat.eecs %>%
+    scDotPlot(scale = TRUE,
+              features = genes.to.use,
+              group = "cell_type_initial",
+              groupAnno = "cell_type_initial",
+              annoColors = list("cell_type_initial" = colors.use),
+              groupLegends = FALSE,
+              cluster = FALSE,
+              annoWidth = 0.075)
+
+outfile.dir <- paste(io$figdir, "VASA", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("EEC_subtype_annotations_dotplot_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=6, height=8)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig11
+#| fig-cap: "Data with fluorescence ratios"
+#| fig-width: 10
+#| fig-height: 7
+
+library(tidyverse)     ## data wrangling + ggplot2
+library(colorspace)    ## adjust colors
+library(ggforce)       ## sina plots
+library(ggdist)        ## halfeye plots
+library(ggridges)      ## ridgeline plots
+library(ggbeeswarm)    ## beeswarm plots
+library(gghalves)      ## off-set jitter
+library(systemfonts)   ## custom fonts
+
+meta.df <- FetchData(data.seurat.eecs, c("DT", "cell_type_initial"))
+
+levels <- meta.df %>% 
+  group_by(cell_type_initial) %>% 
+  dplyr::summarize(DT=median(DT)) %>%
+  ungroup() %>% 
+  arrange(desc(DT)) %>% 
+  pull(cell_type_initial)
+
+meta.df$cell_type_initial <- factor(meta.df$cell_type_initial, levels=levels)
+meta.df <- meta.df %>% arrange(cell_type_initial)
+
+p <- ggplot(data=meta.df, aes(x=`DT`, y=`cell_type_initial`, fill=`cell_type_initial`)) + 
+  geom_violin(
+    aes(fill = `cell_type_initial`, fill = after_scale(colorspace::lighten(fill, .5))), bw = .2, color=NA
+  ) + 
+   geom_boxplot(
+    width = .1, outlier.shape = NA
+  ) +
+  stat_summary(
+    geom = "point",
+    fun = median,
+    color = "black"
+  ) + 
+  theme_minimal() + 
+  theme(
+    axis.text.x = element_text(color = "black"),
+    axis.text.y = element_text(color = "black", family = "sans"),
+    axis.line.x = element_line(color = "black"),
+    panel.grid.major.y = element_line(color = "grey90"),
+    plot.background = element_rect(fill = "white", color = "white"),
+    plot.margin = margin(rep(20, 4)),
+    legend.position="none"
+  ) + 
+  labs(x="Normalized DT", y="") + 
+  scale_x_continuous(expand=c(0, 0)) +
+  scale_fill_manual(values=project.params$ct.colors)
+print(p)
+
+outfile.dir <- paste(io$figdir, "VASA", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Cell_types_sorted_by_fluorescent_ratios_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=8, height=4)
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+#| label: fig12
+#| fig-cap: "EEC subset with subclustering"
+#| fig-width: 10
+#| fig-height: 7
+
+data.seurat.eecs <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.v3.annotated.rds"))
+
+features <- c("NEUROG3", "GHRL", "LMX1A", "SST", "CCK", "GAST", "GIP", "NTS", "MLN", "TPH1")
+features <- intersect(features, rownames(data.seurat.eecs))
+
+plotlist <- lapply(features, function(x){
+  SCpubr::do_FeaturePlot(sample = data.seurat.eecs, features = x, reduction="umap", legend.title = x, order=TRUE) + guides(fill = 'none')   
+})
+
+p <- ggarrange(plotlist=plotlist, nrow=3, ncol=3) 
+
+outfile.dir <- paste(io$figdir, "VASA", "Marker", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Hormonal_Markers_", current_datetime, ".pdf"))
+
+pdf(outfile.path, width=15, height=15)
+print(p)
+dev.off()
+
+features <- c("PERCC1")
+features <- intersect(features, rownames(data.seurat.eecs))
+
+plotlist <- lapply(features, function(x){
+  SCpubr::do_FeaturePlot(sample = data.seurat.eecs, features = x, reduction="umap", legend.title = x, order=TRUE) + guides(fill = 'none')   
+})
+
+p <- ggarrange(plotlist=plotlist, nrow=3, ncol=3) 
+
+outfile.dir <- paste(io$figdir, "VASA", "Marker", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Additional_Markers_", current_datetime, ".pdf"))
+
+pdf(outfile.path, width=15, height=15)
+print(p)
+dev.off()
+
+data.seurat.eecs <- subset(data.seurat.eecs, subset = cell_type_initial %in% c("SMOC2+ cells"), invert=TRUE)
+
+plotlist <- lapply(c("PAX4", "INSM1", "LMX1B", "RFX6", "ASCL2"), function(x){
+  SCpubr::do_FeaturePlot(sample = data.seurat.eecs, features = x, reduction="umap", legend.title = x, order=TRUE) + guides(fill = 'none') 
+})
+
+p <- ggarrange(plotlist=plotlist, nrow=1, ncol=5) 
+
+outfile.dir <- paste(io$figdir, "VASA", "Marker", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Missing_Markers_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=25, height=5)
+```
+
+## Perform DE
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+# Set up the connection to Ensembl
+ensembl <- useEnsembl(biomart = "genes", dataset = "hsapiens_gene_ensembl")
+
+# Retrieve gene biotype information for all genes in your Seurat object
+seurat_genes <- rownames(data.seurat.eecs)
+annotations <- getBM(
+    attributes = c("hgnc_symbol", "gene_biotype"),
+    filters = "hgnc_symbol",
+    values = seurat_genes,
+    mart = ensembl
+)
+saveRDS(annotations, paste0(io$outdir.processed, "/vasa.processed.eecs.gene.annotations.rds"))
+```
+
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+annotations <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.gene.annotations.rds"))
+
+special.transcripts <- annotations %>% 
+                          dplyr::filter(gene_biotype %in% c("lncRNA", "misc_RNA", "snRNA", "snoRNA", "miRNA", "scaRNA")) %>% 
+                          pull(hgnc_symbol)
+```
+
+## Test for DE
+```{r}
+#| eval: true
+#| echo: true
+#| message: false
+#| warning: false
+
+Idents(data.seurat.eecs) <- "cell_type_initial"
+feature.de <- FindAllMarkers(data.seurat.eecs, grouping.var = "orig.ident")
+feature.de <- feature.de %>% 
+                    rowwise() %>%
+                    mutate(sig = ifelse((p_val_adj < 0.05) & (avg_log2FC > 0.1) & (pct.1 > 0.3) & (pct.2 < 0.7 * pct.1), TRUE, FALSE)) %>%
+                    ungroup()
+table(feature.de$sig, feature.de$cluster)
+
+feature.de <- feature.de %>% dplyr::filter(sig==TRUE)
+feature.de.summary <- as.data.frame(table(feature.de$cluster))
+
+# Order the data by frequency
+feature.de.summary$Var1 <- factor(feature.de.summary$Var1, levels = feature.de.summary$Var1[order(feature.de.summary$Freq)])
+
+# ===================== #
+# Create the barplot
+p <- ggplot(feature.de.summary, aes(x = Var1, y = Freq)) +
+  geom_bar(stat = "identity", fill = "grey") +
+  coord_flip() + # Flip the coordinates for better readability
+  xlab("") +
+  ylab("Frequency") +
+  ggtitle("Number of DE features per cell type") +
+  theme_minimal()
+
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Number_DE_genes_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=10, height=5)
+```
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+# Average Expression 
+mat1 <- AverageExpression(data.seurat.eecs, 
+                          assays = c("SCT"), 
+                          features = feature.de$gene,
+                          return.seurat = FALSE, 
+                          group.by = "cell_type_initial",
+                          layer = "data"
+                          )$SCT %>% as.data.frame() 
+mat1 <- t(scale(t(mat1), center=TRUE, scale=TRUE))
+mat1 <- mat1[feature.de$gene,levels(unique(feature.de$cluster))]
+
+features.to.highlight <- c("NEUROG3", "GHRL", "LMX1A", "SST", "CCK", "GAST", "GIP", "NTS", "MLN")
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+library(viridis)
+library(RColorBrewer)
+
+ht_opt(heatmap_column_names_gp = gpar(fontface = "italic"), 
+    heatmap_column_title_gp = gpar(fontsize = 10),
+    legend_border = "black",
+    heatmap_border = TRUE,
+    annotation_border = TRUE
+)
+
+ct.col <- project.params$ct.colors[unique(data.seurat.eecs$cell_type_initial)]
+mat.col <- colorRamp2(c(-2,0,2), c("grey", "white", "#8E0152"))
+
+# ---------------------------------- #
+
+top_ha <- HeatmapAnnotation(ct = colnames(mat1),
+                            col = list(ct = ct.col),
+                            show_annotation_name = c(ct = FALSE),
+                            simple_anno_size = unit(0.1, "cm"))
+
+right_ha <- rowAnnotation(foo = anno_mark(at = which(rownames(mat1) %in% features.to.highlight),
+                                    labels = rownames(mat1)[rownames(mat1)%in%features.to.highlight]))
+                          
+left_ha <- rowAnnotation(ct = feature.de$cluster,
+                        col = list(ct = ct.col),
+                        simple_anno_size = unit(0.1, "cm"),
+                        annotation_legend_param = list(ct = list(title = "Cell type")),
+                        show_annotation_name = FALSE)
+
+p <- Heatmap(mat1, 
+  show_row_names = FALSE, 
+  show_column_names = FALSE, 
+  heatmap_legend_param = list(
+        title = "Scaled\nexpression", at = c(-2, 0, 2), 
+        labels = rev(c("up", "zero", "down"))
+    ),
+  row_split = feature.de$cluster,
+  cluster_rows=FALSE, 
+  cluster_row_slices=FALSE,
+  cluster_columns=FALSE,
+  cluster_column_slices=FALSE, 
+  row_title = NULL,
+  border = TRUE,
+  row_gap = unit(2, "mm"),
+  top_annotation = top_ha,
+  left_annotation = left_ha,
+  right_annotation = right_ha,
+  col = mat.col)
+
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Heatmap_DE_genes_", current_datetime, ".pdf"))
+
+pdf(outfile.path, width=4, height=4)
+draw(p, merge_legend = TRUE)
+dev.off()
+```
+
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+library(scDotPlot)
+
+# Get colors from previous plot
+colors.use <- project.params$ct.colors[c("SMOC2+ cells", "Early EECs", "Early ECs", "Late ECs", "Early X cells", 
+                                                                                          "Late X cells", "D cells", "Early I/K cells", "Late I/K cells", "I cells", "K cells")]
+# First we set the proper levels for the cell type annotations
+data.seurat.eecs$cell_type_initial <- factor(data.seurat.eecs$cell_type_initial, levels=c("SMOC2+ cells", "Early EECs", "Early ECs", "Late ECs", "Early X cells", 
+                                                                                          "Late X cells", "D cells", "Early I/K cells", "Late I/K cells", "I cells", "K cells"))
+
+# Now we specify the gene list we want to visualize
+features.to.use.df <- feature.de %>% 
+  dplyr::filter(sig==TRUE) %>%
+  dplyr::filter(gene %in% special.transcripts) %>% 
+  mutate(cluster = factor(cluster, levels=c("SMOC2+ cells", "Early EECs", "Early ECs", "Late ECs", "Early X cells", 
+                                                                                          "Late X cells", "D cells", "Early I/K cells", "Late I/K cells", "I cells", "K cells"))) %>%
+  arrange(cluster) %>% 
+  group_by(gene) %>% 
+  dplyr::filter(row_number()==1) %>% 
+  ungroup()
+  
+features.to.use <- features.to.use.df %>% 
+  pull(gene) %>% 
+  rev()
+
+p <- data.seurat.eecs %>%
+    scDotPlot(scale = TRUE,
+              features = features.to.use,
+              group = "cell_type_initial",
+              groupAnno = "cell_type_initial",
+              annoColors = list("cell_type_initial" = colors.use),
+              groupLegends = FALSE,
+              cluster = FALSE,
+              annoWidth = 0.075) 
+
+p$plotlist[[1]] <- p$plotlist[[1]] + theme(
+        axis.text.y=element_blank(),  #remove y axis labels
+        axis.ticks.y=element_blank()  #remove y axis ticks
+        ) + 
+  scale_size(range=c(1, 3))
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("DotPlot_DE_non_protein_coding_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=6, height=12)
+```
+
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+#features.plot %>% write.table("/home/adaml9/scratch/eec_fate_analysis/scripts/global_analysis/non_coding_rna_vasa.tsv", sep="\t")
+# Average Expression 
+mat1 <- AverageExpression(data.seurat.eecs, 
+                          assays = c("SCT"), 
+                          features = rev(features.to.use),
+                          return.seurat = FALSE, 
+                          group.by = "cell_type_initial",
+                          layer = "data"
+                          )$SCT %>% as.data.frame() 
+mat1 <- t(scale(t(mat1), center=TRUE, scale=TRUE))
+
+features.to.highlight <- c("PLUT", "PROX1-AS1", "MNX1-AS1", "PAUPAR", "SATB1-AS1", "SSTR5-AS1", "NGF-AS1", "VLDLR-AS1", "HYMAI", "RCAN3AS", "HAR1B")
+
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
+library(viridis)
+library(RColorBrewer)
+
+ht_opt(heatmap_column_names_gp = gpar(fontface = "italic"), 
+    heatmap_column_title_gp = gpar(fontsize = 10),
+    legend_border = "black",
+    heatmap_border = TRUE,
+    annotation_border = TRUE
+)
+
+ct.col <- colors.use
+mat.col <- colorRamp2(c(-2,0,2), c("grey", "white", "#8E0152"))
+
+# ---------------------------------- #
+
+top_ha <- HeatmapAnnotation(ct = colnames(mat1),
+                            col = list(ct = ct.col),
+                            show_annotation_name = c(ct = FALSE),
+                            simple_anno_size = unit(0.1, "cm"))
+
+right_ha <- rowAnnotation(foo = anno_mark(at = which(rownames(mat1) %in% features.to.highlight),
+                                    labels = rownames(mat1)[rownames(mat1)%in%features.to.highlight]))
+                          
+left_ha <- rowAnnotation(ct = features.to.use.df$cluster,
+                        col = list(ct = ct.col),
+                        simple_anno_size = unit(0.1, "cm"),
+                        annotation_legend_param = list(ct = list(title = "Cell type")),
+                        show_annotation_name = FALSE)
+
+p <- Heatmap(mat1, 
+  show_row_names = FALSE, 
+  show_column_names = FALSE, 
+  heatmap_legend_param = list(
+        title = "Scaled\nexpression", at = c(-2, 0, 2), 
+        labels = rev(c("up", "zero", "down"))
+    ),
+  row_split = features.to.use.df$cluster,
+  cluster_rows=FALSE, 
+  cluster_row_slices=FALSE,
+  cluster_columns=FALSE,
+  cluster_column_slices=FALSE, 
+  row_title = NULL,
+  border = TRUE,
+  row_gap = unit(2, "mm"),
+  top_annotation = top_ha,
+  left_annotation = left_ha,
+  right_annotation = right_ha,
+  col = mat.col)
+
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Heatmap_DE_non_protein_coding_", current_datetime, ".pdf"))
+
+pdf(outfile.path, width=5, height=7)
+draw(p, merge_legend = TRUE)
+dev.off()
+
+# ---------------------------------- #
+# Show violin plots for RNAs
+
+plotlist <- lapply(features.to.highlight, function(feature){
+
+  p <- SCpubr::do_FeaturePlot(sample = data.seurat.eecs,
+                             features = feature, 
+                             legend.title = feature, 
+                             order=TRUE)
+  #feature.df <- FetchData(data.seurat.eecs, c(feature, "cell_type_initial"))
+  # Box plot by group with jitter
+  #p <- ggplot(feature.df, aes(x = cell_type_initial, y = !!rlang::sym(feature))) + 
+  #  geom_boxplot(aes(fill = cell_type_initial), outlier.shape = NA) +
+  #  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + 
+  #  geom_jitter(color="black") + 
+  #  labs(x="") 
+  return(p)
+})
+
+p <- ggarrange(plotlist = plotlist, ncol=5, nrow=3)
+
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Violin_plots_non_protein_coding_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=25, height=15)
+
+# ---------------------------------- #
+# Show boxplots
+
+ct.col <- project.params$ct.colors[unique(data.seurat.eecs$cell_type_initial)]
+
+plotlist <- lapply(features.to.highlight, function(feature){
+
+  feature.df <- FetchData(data.seurat.eecs, c(feature, "cell_type_initial"))
+  p <- ggplot(feature.df, aes(x = cell_type_initial, y = !!rlang::sym(feature))) + 
+    geom_boxplot(aes(fill = cell_type_initial), outlier.shape = NA) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1),
+          legend.position="none") + 
+    scale_fill_manual(values=ct.col) +
+    labs(x="") 
+  return(p)
+})
+
+p <- ggarrange(plotlist = plotlist, ncol=5, nrow=3)
+
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Box_plots_non_protein_coding_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=14, height=8)
+```
+
+## Plot Dn-ds scores per cell type
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+# Load dnds scores 
+dnds_df <- readRDS("/pstore/data/ihb-intestine-evo/evo_signature/DN_DS_ratio/data/Dat_human_to_10sp_one2one_orthologs_dnds_ratio.rds")
+dnds_df <- dnds_df %>% drop_na(primate)
+
+shared_genes <- intersect(rownames(dnds_df), rownames(data.seurat.eecs))
+ave_dnds <- setNames(dnds_df[["primate"]], rownames(dnds_df))
+ave_dnds <- ave_dnds[shared_genes]
+
+ave_dnds_df <- ave_dnds %>% enframe() %>% unnest()
+
+dnds.per.cell <- colSums((data.seurat.eecs@assays$SCT@data[names(ave_dnds),] * ave_dnds[names(ave_dnds)])) / 
+                 colSums((data.seurat.eecs@assays$SCT@data[names(ave_dnds),]))
+dnds.per.cell <- dnds.per.cell %>% enframe() %>% unnest() %>% dplyr::rename(c("barcode" = "name", "score" = "value"))
+
+dnds.per.cell <- dnds.per.cell %>% 
+  left_join(data.seurat.eecs@meta.data %>% 
+  dplyr::select(-c("barcode")) %>%
+  rownames_to_column(var="barcode"), by = ("barcode" = "barcode"))
+
+ct.ordering <- dnds.per.cell %>%
+  group_by(cell_type_initial) %>%
+  dplyr::summarize(score = median(score)) %>%
+  ungroup() %>%
+  arrange(desc(score)) %>%
+  pull(cell_type_initial)
+
+dnds.per.cell$cell_type_initial <- factor(dnds.per.cell$cell_type_initial, levels=ct.ordering)
+
+ct.col <- c("Early EECs" = "#ffb308", 
+            "Early ECs" = "#8e1382",
+            "Late ECs" = "#8e134e",
+            "Early X cells" = "#ff6f00",
+            "Late X cells" = "#ff2f00",
+            "SMOC2+ cells" = "#43a148",
+            "I cells" = "#573894",
+            "K cells" = "#853894",
+            "Early I/K cells" = "#536894",
+            "Late I/K cells" = "#2d62a4",
+            "D cells" = "#ed496f")
+
+p <- ggplot(dnds.per.cell, aes(x = cell_type_initial, y = score)) + 
+    geom_boxplot(aes(fill = cell_type_initial), outlier.shape = NA) +
+    theme_bw() + 
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1), 
+          legend.position = "none") +
+    scale_fill_manual(values=ct.col) +
+    labs(x="", y="Dn/Ds-weighted gene expression")
+
+outfile.dir <- paste(io$figdir, "VASA", "DE", sep="/", collapse="")
+if(!dir.exists(outfile.dir)){
+    dir.create(outfile.dir, recursive=TRUE)
+}
+# Get the current date and time using lubridate
+current_datetime <- format(now(), "%Y%m%d_%H%M%S")
+
+# Construct the output file path with date and time
+outfile.path <- file.path(outfile.dir, paste0("Boxplot_dnds_scores_", current_datetime, ".pdf"))
+
+ggsave(outfile.path, p, width=4, height=4)
+```
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+# ===================== #
+
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(DOSE)
+hs <- org.Hs.eg.db
+
+universe <- select(hs, 
+       keys = rownames(data.seurat.eecs),
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")$ENTREZID
+universe <- universe[!is.na(universe)]
+
+deg.ls <- split(top_N, top_N$cluster)
+deg.ls <- lapply(deg.ls, function(x){
+  geneList <- x$avg_log2FC
+  names(geneList) <- x$gene
+  geneList <- geneList[order(names(geneList))]
+  return(geneList)
+})
+
+deg.ls <- lapply(deg.ls, function(x){
+  d <- select(hs, 
+       keys = names(x),
+       columns = c("ENTREZID", "SYMBOL"),
+       keytype = "SYMBOL")$ENTREZID
+  x <- x[!is.na(d)]
+  names(x) <- d[!is.na(d)]
+  x <- x[order(x, decreasing = TRUE)]
+  x <- names(x)
+  return(x)
+})
+
+## go enrichment per cluster
+go.ls <- deg.ls %>% map(~{
+  eGO <- enrichGO(
+    gene          = .x,
+    OrgDb         = org.Hs.eg.db,
+    universe      = universe,
+    keyType       = "ENTREZID",
+    ont           = "BP",
+    pAdjustMethod = "BH",
+    pvalueCutoff  = 0.05
+  )
+  return(eGO)
+})
+
+## enrichment visu
+barplotTerm <- function(object,
+                        x = "Count",
+                        color = 'p.adjust',
+                        showCategory = 8,
+                        font.size = 12,
+                        title = "") {
+  ## use *height* to satisy barplot generic definition
+  ## actually here is an enrichResult object.
+  colorBy <- color
+  
+  df <- fortify(object, showCategory = showCategory, by = x)
+  df$p.adjust <- -log10(df$p.adjust)
+  #df <- df[c(1:3,9:12,15,16),]
+  if (colorBy %in% colnames(df)) {
+    p <-
+      ggplot(df, aes_string(x = x, y = "Description")) +
+      theme_dose(font.size) 
+  } else {
+    p <- ggplot(df, aes_string(x = x, y = "Description")) +
+      theme_dose(font.size) +
+      theme(legend.position = "none")
+  }
+  p <- p + geom_col(fill = "grey") + ggtitle(title) + xlab('-log10 FDR') + ylab(NULL)
+  return(p)
+}
+
+plotlist <- lapply(1:length(deg.ls), function(x){
+  name <- names(deg.ls)[[x]]
+  g1 = barplotTerm(go.ls[[x]], showCategory = 10, title = paste0(name, " GO"), color = 'blue', x = 'p.adjust')
+  return(g1)
+})
+
+p <- ggarrange(plotlist=plotlist, ncol=2, nrow=6)
+ggsave("/home/adaml9/scratch/eec_fate_analysis/scripts/global_analysis/test.pdf", p, width=15, height=20)
+```
+
+```{r}
+#| eval: false
+#| echo: true
+#| message: false
+#| warning: false
+
+set.seed(123)  
+library(biomaRt)
+library(scGSVA) 
+
+data.seurat.eecs <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.v2.annotated.rds"))
+
+hsgo<-buildAnnot(species="human",keytype="SYMBOL",anntype="GO")
+res<-scgsva(data.seurat.eecs,hsgo,method="ssgsea") ## or use UCell
+
+saveRDS(res, paste0(io$outdir.processed, "/vasa.processed.eecs.go.ssgsea.rds"))
+
+res <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.go.ssgsea.rds"))
+
+pdf("/home/adaml9/scratch/eec_fate_analysis/scripts/global_analysis/test.pdf")
+ridgePlot(res,features="axonemal.microtubule.depolymerization",group_by="cell_type_initial")
+dev.off()
+
+design.matrix <- model.matrix(~0+cell_type_initial, res@obj@meta.data)
+colnames(design.matrix) <- gsub("cell_type_initial", "", colnames(design.matrix))
+
+res@obj <- AddMetaData(res@obj, design.matrix)
+
+res.terms.found <- list()
+for(ct.query in colnames(design.matrix)){
+  ## Find significant pathways across groups
+  res.terms.find <- findPathway(res,group = ct.query) 
+  res.terms.find <- res.terms.find %>% dplyr::filter((logFC > 0.1) & (adj.P.Val < 0.05)) %>% 
+                        arrange(desc(logFC)) %>% 
+                        rownames_to_column(var="pathway")
+  res.terms.found[[ct.query]] <- res.terms.find
+}
+res.terms.found <- res.terms.found %>% enframe() %>% unnest()
+
+
+res.terms.found <- res.terms.found %>% arrange(desc(logFC))
+
+## Find significant pathways across groups
+res.terms.find <- findPathway(res,group = "cell_type_initial")
+res.terms.find %>% 
+  group_by(comparision) %>%
+  slice_max(logFC, n=5) %>%
+  ungroup() %>%
+  print(n=50)
+
+
+res.terms.sig <- sigPathway(res, group = "cell_type_initial")
+
+saveRDS(res.terms.sig, paste0(io$outdir.processed, "/vasa.processed.eecs.go.ssgsea.terms.sig.rds"))
+
+res.terms.sig <- readRDS(paste0(io$outdir.processed, "/vasa.processed.eecs.go.ssgsea.terms.sig.rds"))
+```
